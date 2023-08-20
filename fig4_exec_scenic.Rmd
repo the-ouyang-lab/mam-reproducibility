@@ -1,0 +1,165 @@
+---
+title: "Regulon analysis"
+author: "Yi Xie"
+date: "2023-06-08"
+output:
+  pdf_document: default
+  html_document:
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+The following analysis is replicating what described in 'Regulon analaysis' in Material and Method session (https://www.biorxiv.org/content/10.1101/2022.12.20.521178v1?rss=1)
+
+Path to original figure pdf files:
+https://drive.google.com/drive/u/1/folders/1iX1HGcKyitPYyQjCG501GW5xJmd5F1EW
+
+## 1. INSTALL pySCENIC
+```{r, engine = 'bash', eval = FALSE}
+module load singularity
+cd /data/petretto/home/e0205142/software/
+singularity build aertslab-pyscenic-0.12.0.sif docker://aertslab/pyscenic:0.12.0
+```
+
+Usage of pySCENIC in singulatiry container:
+```{r, engine = 'bash', eval = FALSE}
+## Overall usage
+singularity run aertslab-pyscenic-0.12.0.sif pyscenic -h
+## sub-command help
+singularity run aertslab-pyscenic-0.12.0.sif pyscenic grn -h
+singularity run aertslab-pyscenic-0.12.0.sif pyscenic ctx -h
+```
+
+## 2. Dependency
+Download dependent databases of SCENIC including:
+- TF lists
+- human genome ranked by regulatory features (feather files)
+- Motif-to-TF annotations
+
+```{r, engine = 'bash', eval = FALSE}
+mkdir pyscenic_dep
+cd /pyscenic_dep
+
+# A. list of human TFs:
+https://github.com/aertslab/pySCENIC/blob/master/resources/hs_hgnc_tfs.txt
+
+# B. database ranking the whole human genome on regulatory features (TFs etc) (.feather)
+## B.1 500bp upstream of TSS (transcripton starting site)
+feather_database_url='https://resources.aertslab.org/cistarget/databases/
+homo_sapiens/hg19/refseq_r45/mc9nr/gene_based/
+hg19-500bp-upstream-10species.mc9nr.genes_vs_motifs.rankings.feather'
+wget "${feather_database_url}" --no-check-certificate
+### B.2 5kb around the TSS (10kb in total)
+feather_database_url='https://resources.aertslab.org/cistarget/databases/
+homo_sapiens/hg19/refseq_r45/mc9nr/gene_based/
+hg19-tss-centered-5kb-10species.mc9nr.genes_vs_motifs.rankings.feather'
+wget "${feather_database_url}" --no-check-certificate
+
+## C. Motif to TF annotations:
+wget --no-check-certificate
+https://resources.aertslab.org/cistarget/motif2tf/motifs-v9-nr.hgnc-m0.001-o0.0.tbl
+
+```
+
+## 3. Loom file
+Input to pySCENIC is loom file. Extract count martix from SeuratObject and convert it with python module loompy
+
+Enter my working directory for this analysis
+```{r, engine = 'bash', eval = FALSE}
+cd /data/petretto/home/e0205142/project/Kevin/fig4
+```
+### 3.1 Extract raw count matrix from SeuratObject
+expression matrix from integrated assay (24105 cells by 3000 genes)
+```{r, eval = FALSE}
+SPP1seu <- readRDS('./data/SPP1seu.rds')
+write.csv(t(as.matrix(SPP1seu@assays$integrated@data)),
+          file = "./data/SPP1seu_exp.csv")
+cellInfo <- SPP1seu@meta.data
+head(cellInfo)
+write.csv(cellInfo, file = "./data/SPP1seu_cellInfo.csv")
+```
+
+### 3.2 Convert to loom file
+```{r, engine = 'bash', eval = FALSE}
+cd ./code/
+vim make_loom.py
+
+## add following python codes to make_loom.py
+import os, sys
+os.getcwd()
+os.listdir(os.getcwd())
+import loompy as lp
+import numpy as np
+import scanpy as sc
+
+x=sc.read_csv("../data/SPP1seu_exp.csv");
+row_attrs = {"Gene": np.array(x.var_names),};
+col_attrs = {"CellID": np.array(x.obs_names)};
+lp.create("../data/SPP1seu.loom",x.X.transpose(),row_attrs,col_attrs)
+
+## excute make_loom.py
+conda activate torch-py38 # I have loompy and scanpy pre-installed in this conda env
+python make_loom.py
+conda deactivate
+```
+
+## 4. run pySCENIC
+
+Start an interactive session in HPC for following analysis
+```{r, engine = 'bash', eval = FALSE}
+qsub -IX -l select=1:ncpus=50:mem=200G:ngpus=0 -l walltime=72:00:00 -q super
+
+cd /data/petretto/home/e0205142/project/Kevin/fig4/
+module load singularity/
+
+```
+
+### 4.1 grnboost2
+Infer GRN with grnboost2. This step took around 2.5 hrs to run.
+```{r, engine = 'bash', eval = FALSE}
+singularity run ~/software/aertslab-pyscenic-0.12.0.sif \
+pyscenic grn --num_workers 40 \
+  --sparse \
+  --method grnboost2 \
+  --output ./final_output/scenic/SPP1seu.adj.csv \
+  ./data/SPP1seu.loom \
+  ~/software/pyscenic_dep/hs_hgnc_tfs.txt
+
+```
+
+### 4.2 RcisTarget
+Start to filter GRNs to get regulons with RcisTarget.
+
+Here two databases (up 500bp & ±5kb) are used for motif enrichment as described in MAM manuscript.
+
+
+```{r, engine = 'bash', eval = FALSE}
+
+singularity run /data/petretto/home/e0205142/software/aertslab-pyscenic-0.12.0.sif \
+pyscenic ctx --num_workers 40 \
+  --mode "dask_multiprocessing" \
+  --all_modules \
+  --min_genes 10 \
+  --output ./final_output/scenic/SPP1seu.regulons.csv \
+  --expression_mtx_fname ./data/SPP1seu.loom \
+  --annotations_fname /data/petretto/home/e0205142/software/pyscenic_dep/motifs-v9-nr.hgnc-m0.001-o0.0.tbl \
+  ./final_output/scenic/SPP1seu.adj.csv \
+  /data/petretto/home/e0205142/software/pyscenic_dep/hg19-500bp-upstream-10species.mc9nr.genes_vs_motifs.rankings.feather \
+  /data/petretto/home/e0205142/software/pyscenic_dep/hg19-tss-centered-5kb-10species.mc9nr.genes_vs_motifs.rankings.feather
+
+```
+
+### 4.3 AUCell
+To score each regulon's activity in each cell and get regulon activity matrix.
+```{r, engine = 'bash', eval = FALSE}
+singularity run /data/petretto/home/e0205142/software/aertslab-pyscenic-0.12.0.sif \
+pyscenic aucell --num_workers 40 \
+  --output ./final_output/scenic/SPP1seu_SCENIC_res.loom \
+  ./data/SPP1seu.loom \
+  ./final_output/scenic/SPP1seu.regulons.csv
+
+```
+
