@@ -1,7 +1,7 @@
 # mam-reproducibility
 This repository contains the code for reproducing the single-cell analysis in the paper "SYSTEMS LEVEL IDENTIFICATION OF A MATRISOME-ASSOCIATED MACROPHAGE POLARIZATION STATE IN MULTI-ORGAN FIBROSIS". 
 
-Reference: TBC
+Reference: [Systems level identification of a matrisome-associated macrophage polarisation state in multi-organ fibrosis](https://elifesciences.org/articles/85530)
 
 The code is arranged according to the order of the figures in the paper:
 - fig0_prepData1a.R: Script for tidying Liver / Lung / Heart datasets
